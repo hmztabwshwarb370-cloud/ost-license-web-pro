@@ -191,25 +191,14 @@ def approve(req_id):
     code = make_license(r["product_code"], r["device_id"])
 
     with conn() as c:
-        c.execute("""
-            INSERT INTO licenses(request_id, product_code, client_name, phone, device_id, license_code, status, created_at)
-            VALUES(?,?,?,?,?,?,?,?)
-        """, (
-            req_id,
-            r["product_code"],
-            r["client_name"],
-            r["phone"],
-            r["device_id"],
-            code,
-            "active",
-            now()
-        ))
-
-        c.execute(
-            "UPDATE requests SET status='approved', license_code=?, updated_at=? WHERE id=?",
-            (code, now(), req_id)
-        )
-        c.commit()
+    cur = c.execute('''INSERT INTO requests(product_code,client_name,phone,email,device_id,device_label,app_version,status,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?)''', (
+        data.get('product_code','').strip().upper(), data.get('client_name','').strip(), data.get('phone','').strip(),
+        data.get('email','').strip(), data.get('device_id','').strip(), data.get('device_label','').strip(),
+        data.get('app_version','').strip(), 'pending', now(), now()
+    ))
+    req_id = cur.lastrowid
+    c.commit()
 
     flash("تم إصدار كود التفعيل")
     return redirect(url_for("dashboard"))
