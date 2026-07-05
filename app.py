@@ -63,24 +63,27 @@ def init_db():
             created_at TEXT NOT NULL
         );
         ''')
-        c.execute("INSERT OR IGNORE INTO products(code,name,created_at) VALUES(?,?,?)", ('MOSQUE_MANAGER','نظام إدارة المساجد والمعاهد',now()))
+        c.execute(
+            "INSERT OR IGNORE INTO products(code,name,created_at) VALUES(?,?,?)",
+            ('MOSQUE_MANAGER', 'نظام إدارة المساجد والمعاهد', now())
+        )
         c.commit()
 
 init_db()
 
 def rows(query, args=()):
     with conn() as c:
-        return [dict(r) for r in c.execute(query,args).fetchall()]
+        return [dict(r) for r in c.execute(query, args).fetchall()]
 
 def one(query, args=()):
     with conn() as c:
-        r = c.execute(query,args).fetchone()
+        r = c.execute(query, args).fetchone()
         return dict(r) if r else None
 
 def make_license(product_code, device_id, days=None):
     raw = f'{product_code}|{device_id}|{secrets.token_hex(8)}|{now()}'
     digest = hmac.new(SECRET_KEY.encode(), raw.encode(), hashlib.sha256).hexdigest().upper()
-    return 'OST-' + '-'.join([digest[i:i+4] for i in range(0,16,4)])
+    return 'OST-' + '-'.join([digest[i:i+4] for i in range(0, 16, 4)])
 
 def login_required(fn):
     @wraps(fn)
@@ -94,7 +97,7 @@ def login_required(fn):
 def home():
     return redirect(url_for('dashboard') if session.get('admin') else url_for('login'))
 
-@app.route('/login', methods=['GET','POST'])
+@app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
         if request.form.get('username') == ADMIN_USER and request.form.get('password') == ADMIN_PASS:
@@ -105,7 +108,8 @@ def login():
 
 @app.route('/logout')
 def logout():
-    session.clear(); return redirect(url_for('login'))
+    session.clear()
+    return redirect(url_for('login'))
 
 @app.route('/dashboard')
 @login_required
@@ -123,12 +127,12 @@ def dashboard():
 @app.route('/products', methods=['POST'])
 @login_required
 def add_product():
-    code = request.form.get('code','').strip().upper().replace(' ','_')
-    name = request.form.get('name','').strip()
+    code = request.form.get('code', '').strip().upper().replace(' ', '_')
+    name = request.form.get('name', '').strip()
     if code and name:
         try:
             with conn() as c:
-                c.execute('INSERT INTO products(code,name,created_at) VALUES(?,?,?)', (code,name,now()))
+                c.execute('INSERT INTO products(code,name,created_at) VALUES(?,?,?)', (code, name, now()))
                 c.commit()
             flash('تمت إضافة المنتج')
         except Exception as e:
@@ -139,13 +143,20 @@ def add_product():
 @login_required
 def approve(req_id):
     r = one('SELECT * FROM requests WHERE id=?', (req_id,))
-    if not r: flash('الطلب غير موجود'); return redirect(url_for('dashboard'))
+    if not r:
+        flash('الطلب غير موجود')
+        return redirect(url_for('dashboard'))
+
     code = make_license(r['product_code'], r['device_id'])
+
     with conn() as c:
         c.execute('''INSERT INTO licenses(request_id,product_code,client_name,phone,device_id,license_code,status,created_at)
-                     VALUES(?,?,?,?,?,?,?,?)''', (req_id,r['product_code'],r['client_name'],r['phone'],r['device_id'],code,'active',now()))
-        c.execute("UPDATE requests SET status='approved', license_code=?, updated_at=? WHERE id=?", (code,now(),req_id))
+                     VALUES(?,?,?,?,?,?,?,?)''',
+                  (req_id, r['product_code'], r['client_name'], r['phone'], r['device_id'], code, 'active', now()))
+        c.execute("UPDATE requests SET status='approved', license_code=?, updated_at=? WHERE id=?",
+                  (code, now(), req_id))
         c.commit()
+
     flash('تم إصدار كود التفعيل')
     return redirect(url_for('dashboard'))
 
@@ -153,14 +164,16 @@ def approve(req_id):
 @login_required
 def reject(req_id):
     with conn() as c:
-        c.execute("UPDATE requests SET status='rejected', updated_at=? WHERE id=?", (now(),req_id)); c.commit()
+        c.execute("UPDATE requests SET status='rejected', updated_at=? WHERE id=?", (now(), req_id))
+        c.commit()
     return redirect(url_for('dashboard'))
 
 @app.route('/revoke/<int:lic_id>', methods=['POST'])
 @login_required
 def revoke(lic_id):
     with conn() as c:
-        c.execute("UPDATE licenses SET status='revoked' WHERE id=?", (lic_id,)); c.commit()
+        c.execute("UPDATE licenses SET status='revoked' WHERE id=?", (lic_id,))
+        c.commit()
     flash('تم إلغاء الترخيص')
     return redirect(url_for('licenses'))
 
@@ -170,47 +183,89 @@ def licenses():
     lics = rows('SELECT * FROM licenses ORDER BY id DESC')
     return render_template('licenses.html', lics=lics, app_name=APP_NAME)
 
-@app.route('/api/activation_request', methods=['POST'])
+@app.route('/api/activation_request', methods=['GET', 'POST'])
 def api_activation_request():
-    data = request.get_json(silent=True) or request.form.to_dict() or {}
-    required = ['product_code','client_name','phone','device_id']
-    missing = [k for k in required if not str(data.get(k,'')).strip()]
+    # يدعم الطلب من النظام سواء أرسل GET أو POST أو JSON
+    data = request.get_json(silent=True) or request.form.to_dict() or request.args.to_dict() or {}
+
+    required = ['product_code', 'client_name', 'phone', 'device_id']
+    missing = [k for k in required if not str(data.get(k, '')).strip()]
+
     if missing:
         return jsonify(ok=False, error='missing_fields', fields=missing), 400
+
     with conn() as c:
         c.execute('''INSERT INTO requests(product_code,client_name,phone,email,device_id,device_label,app_version,status,created_at,updated_at)
                      VALUES(?,?,?,?,?,?,?,?,?,?)''', (
-            data.get('product_code','').strip().upper(), data.get('client_name','').strip(), data.get('phone','').strip(),
-            data.get('email','').strip(), data.get('device_id','').strip(), data.get('device_label','').strip(),
-            data.get('app_version','').strip(), 'pending', now(), now()
+            data.get('product_code', '').strip().upper(),
+            data.get('client_name', '').strip(),
+            data.get('phone', '').strip(),
+            data.get('email', '').strip(),
+            data.get('device_id', '').strip(),
+            data.get('device_label', '').strip(),
+            data.get('app_version', '').strip(),
+            'pending',
+            now(),
+            now()
         ))
-        req_id = c.lastrowid; c.commit()
+        req_id = c.lastrowid
+        c.commit()
+
     return jsonify(ok=True, request_id=req_id, message='activation_request_received')
 
-@app.route('/api/activate', methods=['POST'])
+@app.route('/api/activate', methods=['GET', 'POST'])
 def api_activate():
-    data = request.get_json(silent=True) or request.form.to_dict() or {}
-    product_code = data.get('product_code','').strip().upper()
-    device_id = data.get('device_id','').strip()
-    license_code = data.get('license_code','').strip().upper()
-    lic = one('SELECT * FROM licenses WHERE product_code=? AND device_id=? AND license_code=?', (product_code,device_id,license_code))
+    data = request.get_json(silent=True) or request.form.to_dict() or request.args.to_dict() or {}
+
+    product_code = data.get('product_code', '').strip().upper()
+    device_id = data.get('device_id', '').strip()
+    license_code = data.get('license_code', '').strip().upper()
+
+    lic = one(
+        'SELECT * FROM licenses WHERE product_code=? AND device_id=? AND license_code=?',
+        (product_code, device_id, license_code)
+    )
+
     if not lic:
         return jsonify(ok=False, error='invalid_license'), 403
+
     if lic['status'] != 'active':
         return jsonify(ok=False, error='license_not_active'), 403
+
     if lic.get('expires_at'):
         try:
             if datetime.strptime(lic['expires_at'], '%Y-%m-%d') < datetime.now():
                 return jsonify(ok=False, error='license_expired'), 403
-        except Exception: pass
-    signed = hmac.new(SECRET_KEY.encode(), f"{product_code}|{device_id}|{license_code}".encode(), hashlib.sha256).hexdigest()
-    return jsonify(ok=True, product_code=product_code, device_id=device_id, license_code=license_code, signature=signed)
+        except Exception:
+            pass
 
-@app.route('/api/verify', methods=['POST'])
+    signed = hmac.new(
+        SECRET_KEY.encode(),
+        f"{product_code}|{device_id}|{license_code}".encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+    return jsonify(
+        ok=True,
+        product_code=product_code,
+        device_id=device_id,
+        license_code=license_code,
+        signature=signed
+    )
+
+@app.route('/api/verify', methods=['GET', 'POST'])
 def api_verify():
-    data = request.get_json(silent=True) or {}
-    lic = one('SELECT * FROM licenses WHERE product_code=? AND device_id=? AND license_code=? AND status="active"', (
-        data.get('product_code','').strip().upper(), data.get('device_id','').strip(), data.get('license_code','').strip().upper()))
+    data = request.get_json(silent=True) or request.form.to_dict() or request.args.to_dict() or {}
+
+    lic = one(
+        'SELECT * FROM licenses WHERE product_code=? AND device_id=? AND license_code=? AND status="active"',
+        (
+            data.get('product_code', '').strip().upper(),
+            data.get('device_id', '').strip(),
+            data.get('license_code', '').strip().upper()
+        )
+    )
+
     return jsonify(ok=bool(lic))
 
 @app.route('/health')
