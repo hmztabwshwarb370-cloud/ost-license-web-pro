@@ -1,381 +1,155 @@
 import os
 import sqlite3
-import hashlib
-import hmac
-import secrets
 from datetime import datetime
-from functools import wraps
-
-from flask import (
-    Flask, request, jsonify, render_template,
-    redirect, url_for, session, flash, make_response
-)
+from flask import Flask, request, jsonify, render_template, redirect, url_for
 from flask_cors import CORS
 
-
-APP_NAME = "OST TECH License Manager"
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.environ.get("DATABASE_PATH", os.path.join(BASE_DIR, "instance", "licenses.db"))
-SECRET_KEY = os.environ.get("SECRET_KEY", "CHANGE_ME_OST_LICENSE_SECRET")
-ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
-ADMIN_PASS = os.environ.get("ADMIN_PASS", "admin")
-
 app = Flask(__name__)
-app.secret_key = SECRET_KEY
-CORS(app)
+# تفعيل الـ CORS لدعم الطلبات المتقاطعة من البرنامج المحلي
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-
-
-def now():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def conn():
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row
-    return c
-
-
-def json_response(payload, status=200):
-    response = make_response(jsonify(payload), status)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-    return response
-
-
-def get_request_data():
-    return request.get_json(silent=True) or request.form.to_dict() or request.args.to_dict() or {}
-
+DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'settings.xlsx') 
+# ملاحظة: إذا كان نظامك يعتمد على قاعدة بيانات SQLite حقيقية، تأكد من مسار ملف الـ .db الصحيح هنا
+DB_FILE = os.path.join(os.path.dirname(__file__), 'license.db')
 
 def init_db():
-    with conn() as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS products(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            code TEXT UNIQUE NOT NULL,
-            name TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS requests(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            product_code TEXT NOT NULL,
-            client_name TEXT NOT NULL,
-            phone TEXT NOT NULL,
-            email TEXT,
-            device_id TEXT NOT NULL,
-            device_label TEXT,
-            app_version TEXT,
-            status TEXT NOT NULL DEFAULT 'pending',
-            license_code TEXT,
-            notes TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS licenses(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            request_id INTEGER,
-            product_code TEXT NOT NULL,
-            client_name TEXT NOT NULL,
-            phone TEXT NOT NULL,
-            device_id TEXT NOT NULL,
-            license_code TEXT UNIQUE NOT NULL,
-            status TEXT NOT NULL DEFAULT 'active',
-            max_activations INTEGER DEFAULT 1,
-            expires_at TEXT,
-            created_at TEXT NOT NULL
-        );
+    """تهيئة قاعدة البيانات وإنشاء جدول الطلبات إذا لم يكن موجوداً"""
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_code TEXT,
+                client_name TEXT,
+                phone TEXT,
+                email TEXT,
+                device_id TEXT,
+                device_label TEXT,
+                app_version TEXT,
+                status TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
         """)
+        conn.commit()
 
-        c.execute(
-            "INSERT OR IGNORE INTO products(code, name, created_at) VALUES(?,?,?)",
-            ("MOSQUE_MANAGER", "نظام إدارة المساجد والمعاهد", now())
-        )
-        c.commit()
-
-
+# استدعاء دالة التهيئة عند تشغيل التطبيق
 init_db()
 
+def get_db_connection():
+    """إنشاء اتصال آمن مع قاعدة بيانات SQLite"""
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def rows(query, args=()):
-    with conn() as c:
-        return [dict(r) for r in c.execute(query, args).fetchall()]
-
-
-def one(query, args=()):
-    with conn() as c:
-        r = c.execute(query, args).fetchone()
-        return dict(r) if r else None
-
-
-def make_license(product_code, device_id, days=None):
-    raw = f"{product_code}|{device_id}|{secrets.token_hex(8)}|{now()}"
-    digest = hmac.new(SECRET_KEY.encode(), raw.encode(), hashlib.sha256).hexdigest().upper()
-    return "OST-" + "-".join([digest[i:i + 4] for i in range(0, 16, 4)])
-
-
-def login_required(fn):
-    @wraps(fn)
-    def wrapper(*a, **kw):
-        if not session.get("admin"):
-            return redirect(url_for("login"))
-        return fn(*a, **kw)
-    return wrapper
-
+def now_str():
+    """الحصول على التوقيت الحالي بصيغة نصية مجدولة"""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 @app.route("/")
-def home():
-    return redirect(url_for("dashboard") if session.get("admin") else url_for("login"))
+def index():
+    """الصفحة الرئيسية لوحة تحكم التراخيص"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM requests ORDER BY id DESC")
+            reqs = cursor.fetchall()
+        return render_template("index.html", requests=reqs)
+    except Exception as e:
+        return f"Error loading dashboard: {str(e)}", 500
 
+@app.route("/health", methods=["GET"])
+def health_check():
+    """نقطة فحص سلامة وتحديث المنصة"""
+    return jsonify({"status": "healthy", "version": "1.0.1-fixed-sqlite"}), 200
 
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    if request.method == "POST":
-        if request.form.get("username") == ADMIN_USER and request.form.get("password") == ADMIN_PASS:
-            session["admin"] = True
-            return redirect(url_for("dashboard"))
-        flash("بيانات الدخول غير صحيحة")
-    return render_template("login.html", app_name=APP_NAME)
-
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("login"))
-
-
-@app.route("/dashboard")
-@login_required
-def dashboard():
-    stats = {
-        "pending": one("SELECT COUNT(*) c FROM requests WHERE status='pending'")["c"],
-        "approved": one("SELECT COUNT(*) c FROM requests WHERE status='approved'")["c"],
-        "licenses": one("SELECT COUNT(*) c FROM licenses")["c"],
-        "products": one("SELECT COUNT(*) c FROM products")["c"],
-    }
-    reqs = rows("SELECT * FROM requests ORDER BY id DESC LIMIT 200")
-    products = rows("SELECT * FROM products ORDER BY id DESC")
-    return render_template("dashboard.html", stats=stats, reqs=reqs, products=products, app_name=APP_NAME)
-
-
-@app.route("/products", methods=["POST"])
-@login_required
-def add_product():
-    code = request.form.get("code", "").strip().upper().replace(" ", "_")
-    name = request.form.get("name", "").strip()
-
-    if code and name:
-        try:
-            with conn() as c:
-                c.execute(
-                    "INSERT INTO products(code, name, created_at) VALUES(?,?,?)",
-                    (code, name, now())
-                )
-                c.commit()
-            flash("تمت إضافة المنتج")
-        except Exception as e:
-            flash("تعذر إضافة المنتج: " + str(e))
-
-    return redirect(url_for("dashboard"))
-
-
-@app.route("/approve/<int:req_id>", methods=["POST"])
-@login_required
-def approve(req_id):
-    r = one("SELECT * FROM requests WHERE id=?", (req_id,))
-
-    if not r:
-        flash("الطلب غير موجود")
-        return redirect(url_for("dashboard"))
-
-    code = make_license(r["product_code"], r["device_id"])
-
-    with conn() as c:
-        c.execute("""
-            INSERT INTO licenses(
-                request_id, product_code, client_name, phone,
-                device_id, license_code, status, created_at
-            )
-            VALUES(?,?,?,?,?,?,?,?)
-        """, (
-            req_id,
-            r["product_code"],
-            r["client_name"],
-            r["phone"],
-            r["device_id"],
-            code,
-            "active",
-            now()
-        ))
-
-        c.execute(
-            "UPDATE requests SET status='approved', license_code=?, updated_at=? WHERE id=?",
-            (code, now(), req_id)
-        )
-        c.commit()
-
-    flash("تم إصدار كود التفعيل")
-    return redirect(url_for("dashboard"))
-
-
-@app.route("/reject/<int:req_id>", methods=["POST"])
-@login_required
-def reject(req_id):
-    with conn() as c:
-        c.execute(
-            "UPDATE requests SET status='rejected', updated_at=? WHERE id=?",
-            (now(), req_id)
-        )
-        c.commit()
-
-    return redirect(url_for("dashboard"))
-
-
-@app.route("/revoke/<int:lic_id>", methods=["POST"])
-@login_required
-def revoke(lic_id):
-    with conn() as c:
-        c.execute("UPDATE licenses SET status='revoked' WHERE id=?", (lic_id,))
-        c.commit()
-
-    flash("تم إلغاء الترخيص")
-    return redirect(url_for("licenses"))
-
-
-@app.route("/licenses")
-@login_required
-def licenses():
-    lics = rows("SELECT * FROM licenses ORDER BY id DESC")
-    return render_template("licenses.html", lics=lics, app_name=APP_NAME)
-
-
+# دعم الـ GET و POST و OPTIONS بمرونة تامة للروابط مع أو بدون الـ Slash الأخيرة
 @app.route("/api/activation_request", methods=["GET", "POST", "OPTIONS"])
 @app.route("/api/activation_request/", methods=["GET", "POST", "OPTIONS"])
 def api_activation_request():
+    # التعامل مع طلبات الـ OPTIONS المبدئية للـ CORS المتصفحات
     if request.method == "OPTIONS":
-        return json_response({"ok": True}, 200)
+        return "", 200
 
-    data = get_request_data()
+    # تجميع البيانات سواء كانت قادمة كـ JSON أو كـ Query Parameters (GET/POST)
+    if request.method == "POST":
+        if request.is_json:
+            data = request.get_json() or {}
+        else:
+            data = request.form.to_dict() or {}
+    else:
+        data = request.args.to_dict() or {}
 
-    required = ["product_code", "client_name", "phone", "device_id"]
-    missing = [k for k in required if not str(data.get(k, "")).strip()]
-
-    if missing:
-        return json_response({
-            "ok": False,
-            "error": "missing_fields",
-            "fields": missing
-        }, 400)
-
-    with conn() as c:
-        cur = c.execute("""
-            INSERT INTO requests(
-                product_code, client_name, phone, email,
-                device_id, device_label, app_version,
-                status, created_at, updated_at
-            )
-            VALUES(?,?,?,?,?,?,?,?,?,?)
-        """, (
-            data.get("product_code", "").strip().upper(),
-            data.get("client_name", "").strip(),
-            data.get("phone", "").strip(),
-            data.get("email", "").strip(),
-            data.get("device_id", "").strip(),
-            data.get("device_label", "").strip(),
-            data.get("app_version", "").strip(),
-            "pending",
-            now(),
-            now()
-        ))
-
-        req_id = cur.lastrowid
-        c.commit()
-
-    return json_response({
-        "ok": True,
-        "request_id": req_id,
-        "message": "activation_request_received"
-    }, 200)
-
-
-@app.route("/api/activate", methods=["GET", "POST", "OPTIONS"])
-@app.route("/api/activate/", methods=["GET", "POST", "OPTIONS"])
-def api_activate():
-    if request.method == "OPTIONS":
-        return json_response({"ok": True}, 200)
-
-    data = get_request_data()
-
+    # التحقق من وجود المعطيات الأساسية
     product_code = data.get("product_code", "").strip().upper()
+    client_name = data.get("client_name", "").strip()
     device_id = data.get("device_id", "").strip()
-    license_code = data.get("license_code", "").strip().upper()
 
-    lic = one(
-        "SELECT * FROM licenses WHERE product_code=? AND device_id=? AND license_code=?",
-        (product_code, device_id, license_code)
-    )
+    if not product_code or not client_name or not device_id:
+        return jsonify({
+            "ok": false, 
+            "error": "Missing required fields: product_code, client_name, and device_id are mandatory."
+        }), 400
 
-    if not lic:
-        return json_response({"ok": False, "error": "invalid_license"}, 403)
+    try:
+        current_time = now_str()
+        with get_db_connection() as conn:
+            # الإصلاح الجذري: استقبال كائن الـ cursor الناتج عن الـ execute للاستعلام عن lastrowid
+            cur = conn.execute("""
+                INSERT INTO requests (
+                    product_code, client_name, phone, email,
+                    device_id, device_label, app_version,
+                    status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                product_code,
+                client_name,
+                data.get("phone", "").strip(),
+                data.get("email", "").strip(),
+                device_id,
+                data.get("device_label", "").strip(),
+                data.get("app_version", "").strip(),
+                "pending",
+                current_time,
+                current_time
+            ))
+            
+            # جلب معرف الصف المضاف حديثاً من الـ cursor وليس من الـ connection
+            req_id = cur.lastrowid
+            conn.commit()
 
-    if lic["status"] != "active":
-        return json_response({"ok": False, "error": "license_not_active"}, 403)
+        return jsonify({
+            "ok": True,
+            "request_id": req_id,
+            "message": "Activation request registered successfully."
+        }), 200
 
-    if lic.get("expires_at"):
-        try:
-            if datetime.strptime(lic["expires_at"], "%Y-%m-%d") < datetime.now():
-                return json_response({"ok": False, "error": "license_expired"}, 403)
-        except Exception:
-            pass
+    except Exception as e:
+        # إرجاع تفاصيل الخطأ بصيغة JSON واضحة بدلاً من كراش الـ HTTP 500 العام
+        return jsonify({
+            "ok": False,
+            "error": f"Database operation failed: {str(e)}"
+        }), 500
 
-    signed = hmac.new(
-        SECRET_KEY.encode(),
-        f"{product_code}|{device_id}|{license_code}".encode(),
-        hashlib.sha256
-    ).hexdigest()
-
-    return json_response({
-        "ok": True,
-        "product_code": product_code,
-        "device_id": device_id,
-        "license_code": license_code,
-        "signature": signed
-    }, 200)
-
-
-@app.route("/api/verify", methods=["GET", "POST", "OPTIONS"])
-@app.route("/api/verify/", methods=["GET", "POST", "OPTIONS"])
-def api_verify():
-    if request.method == "OPTIONS":
-        return json_response({"ok": True}, 200)
-
-    data = get_request_data()
-
-    lic = one(
-        'SELECT * FROM licenses WHERE product_code=? AND device_id=? AND license_code=? AND status="active"',
-        (
-            data.get("product_code", "").strip().upper(),
-            data.get("device_id", "").strip(),
-            data.get("license_code", "").strip().upper()
-        )
-    )
-
-    return json_response({"ok": bool(lic)}, 200)
-
-
-@app.route("/health", methods=["GET"])
-def health():
-    return json_response({
-        "ok": True,
-        "version": "LICENSE_SERVER_FIXED_FINAL",
-        "app": APP_NAME,
-        "time": now()
-    }, 200)
-
+@app.route("/action/<int:req_id>/<string:status>", methods=["POST"])
+def update_request_status(req_id, status):
+    """تحديث حالة الطلب (قبول/رفض) من لوحة التحكم"""
+    if status not in ["approved", "rejected", "pending"]:
+        return "Invalid status", 400
+        
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                "UPDATE requests SET status = ?, updated_at = ? WHERE id = ?",
+                (status, now_str(), req_id)
+            )
+            conn.commit()
+        return redirect(url_for("index"))
+    except Exception as e:
+        return f"Error updating status: {str(e)}", 500
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "7070"))
+    # تشغيل التطبيق محلياً أو عبر خادم الـ Production
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
