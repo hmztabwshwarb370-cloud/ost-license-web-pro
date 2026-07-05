@@ -6,7 +6,10 @@ import secrets
 from datetime import datetime
 from functools import wraps
 
-from flask import Flask, request, jsonify, render_template, redirect, url_for, session, flash, make_response
+from flask import (
+    Flask, request, jsonify, render_template,
+    redirect, url_for, session, flash, make_response
+)
 from flask_cors import CORS
 
 
@@ -191,14 +194,28 @@ def approve(req_id):
     code = make_license(r["product_code"], r["device_id"])
 
     with conn() as c:
-    cur = c.execute('''INSERT INTO requests(product_code,client_name,phone,email,device_id,device_label,app_version,status,created_at,updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?)''', (
-        data.get('product_code','').strip().upper(), data.get('client_name','').strip(), data.get('phone','').strip(),
-        data.get('email','').strip(), data.get('device_id','').strip(), data.get('device_label','').strip(),
-        data.get('app_version','').strip(), 'pending', now(), now()
-    ))
-    req_id = cur.lastrowid
-    c.commit()
+        c.execute("""
+            INSERT INTO licenses(
+                request_id, product_code, client_name, phone,
+                device_id, license_code, status, created_at
+            )
+            VALUES(?,?,?,?,?,?,?,?)
+        """, (
+            req_id,
+            r["product_code"],
+            r["client_name"],
+            r["phone"],
+            r["device_id"],
+            code,
+            "active",
+            now()
+        ))
+
+        c.execute(
+            "UPDATE requests SET status='approved', license_code=?, updated_at=? WHERE id=?",
+            (code, now(), req_id)
+        )
+        c.commit()
 
     flash("تم إصدار كود التفعيل")
     return redirect(url_for("dashboard"))
@@ -247,11 +264,19 @@ def api_activation_request():
     missing = [k for k in required if not str(data.get(k, "")).strip()]
 
     if missing:
-        return json_response({"ok": False, "error": "missing_fields", "fields": missing}, 400)
+        return json_response({
+            "ok": False,
+            "error": "missing_fields",
+            "fields": missing
+        }, 400)
 
     with conn() as c:
-        c.execute("""
-            INSERT INTO requests(product_code, client_name, phone, email, device_id, device_label, app_version, status, created_at, updated_at)
+        cur = c.execute("""
+            INSERT INTO requests(
+                product_code, client_name, phone, email,
+                device_id, device_label, app_version,
+                status, created_at, updated_at
+            )
             VALUES(?,?,?,?,?,?,?,?,?,?)
         """, (
             data.get("product_code", "").strip().upper(),
@@ -266,7 +291,7 @@ def api_activation_request():
             now()
         ))
 
-        req_id = c.lastrowid
+        req_id = cur.lastrowid
         c.commit()
 
     return json_response({
@@ -345,6 +370,7 @@ def api_verify():
 def health():
     return json_response({
         "ok": True,
+        "version": "LICENSE_SERVER_FIXED_FINAL",
         "app": APP_NAME,
         "time": now()
     }, 200)
